@@ -50,12 +50,38 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> Ref<'a, K, V, S> {
         }
     }
 
+    pub fn into_map<F, T2>(self, f: F) -> MappedValue<'a, K, V, T2, S>
+    where
+        F: FnOnce(&'a V) -> T2,
+    {
+        MappedValue {
+            _guard: self._guard,
+            k: self.k,
+            v: f(unsafe { &*self.v }),
+        }
+    }
+
     pub fn try_map<F, T>(self, f: F) -> Result<MappedRef<'a, K, V, T, S>, Self>
     where
         F: FnOnce(&V) -> Option<&T>,
     {
         if let Some(v) = f(unsafe { &*self.v }) {
             Ok(MappedRef {
+                _guard: self._guard,
+                k: self.k,
+                v,
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn try_into_map<F, T2>(self, f: F) -> Result<MappedValue<'a, K, V, T2, S>, Self>
+    where
+        F: FnOnce(&'a V) -> Option<T2>,
+    {
+        if let Some(v) = f(unsafe { &*self.v }) {
+            Ok(MappedValue {
                 _guard: self._guard,
                 k: self.k,
                 v,
@@ -136,6 +162,17 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> RefMut<'a, K, V, S> {
         }
     }
 
+    pub fn into_map<F, T2>(self, f: F) -> MappedValueMut<'a, K, V, T2, S>
+    where
+        F: FnOnce(&'a mut V) -> T2,
+    {
+        MappedValueMut {
+            _guard: self.guard,
+            k: self.k,
+            v: f(unsafe { &mut *self.v }),
+        }
+    }
+
     pub fn try_map<F, T>(self, f: F) -> Result<MappedRefMut<'a, K, V, T, S>, Self>
     where
         F: FnOnce(&mut V) -> Option<&mut T>,
@@ -147,6 +184,23 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> RefMut<'a, K, V, S> {
         let guard = self.guard;
         let k = self.k;
         Ok(MappedRefMut {
+            _guard: guard,
+            k,
+            v,
+        })
+    }
+
+    pub fn try_into_map<F, T2>(self, f: F) -> Result<MappedValueMut<'a, K, V, T2, S>, Self>
+    where
+        F: FnOnce(&'a mut V) -> Option<T2>,
+    {
+        let v = match f(unsafe { &mut *(self.v as *mut _) }) {
+            Some(v) => v,
+            None => return Err(self),
+        };
+        let guard = self.guard;
+        let k = self.k;
+        Ok(MappedValueMut {
             _guard: guard,
             k,
             v,
@@ -331,5 +385,173 @@ impl<'a, K: Eq + Hash, V, T, S: BuildHasher> Deref for MappedRefMut<'a, K, V, T,
 impl<'a, K: Eq + Hash, V, T, S: BuildHasher> DerefMut for MappedRefMut<'a, K, V, T, S> {
     fn deref_mut(&mut self) -> &mut T {
         self.value_mut()
+    }
+}
+
+pub struct MappedValue<'a, K, V, T, S = RandomState> {
+    _guard: RwLockReadGuard<'a, HashMap<K, V, S>>,
+    k: *const K,
+    v: T,
+}
+
+impl<'a, K: Eq + Hash, V, T, S: BuildHasher> MappedValue<'a, K, V, T, S> {
+    pub fn key(&self) -> &K {
+        self.pair().0
+    }
+
+    pub fn value(&self) -> &T {
+        self.pair().1
+    }
+
+    pub fn pair(&self) -> (&K, &T) {
+        unsafe { (&*self.k, &self.v) }
+    }
+
+    pub fn into_map<F, T2>(self, f: F) -> MappedValue<'a, K, V, T2, S>
+    where
+        F: FnOnce(&T) -> T2,
+    {
+        MappedValue {
+            _guard: self._guard,
+            k: self.k,
+            v: f(&self.v),
+        }
+    }
+
+    pub fn try_into_map<F, T2>(self, f: F) -> Result<MappedValue<'a, K, V, T2, S>, Self>
+    where
+        F: FnOnce(&T) -> Option<T2>,
+    {
+        let v = match f(&self.v) {
+            Some(v) => v,
+            None => return Err(self),
+        };
+        let guard = self._guard;
+        let k = self.k;
+        Ok(MappedValue {
+            _guard: guard,
+            k,
+            v,
+        })
+    }
+}
+
+impl<'a, K: Eq + Hash + Debug, V, T: Debug, S: BuildHasher> Debug for MappedValue<'a, K, V, T, S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedValue")
+            .field("k", &self.k)
+            .field("v", &self.v)
+            .finish()
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T, S: BuildHasher> Deref for MappedValue<'a, K, V, T, S> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value()
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T: std::fmt::Display> std::fmt::Display for MappedValue<'a, K, V, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.value(), f)
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T: AsRef<TDeref>, TDeref: ?Sized> AsRef<TDeref>
+    for MappedValue<'a, K, V, T>
+{
+    fn as_ref(&self) -> &TDeref {
+        self.value().as_ref()
+    }
+}
+
+pub struct MappedValueMut<'a, K, V, T, S = RandomState> {
+    _guard: RwLockWriteGuard<'a, HashMap<K, V, S>>,
+    k: *const K,
+    v: T,
+}
+
+impl<'a, K: Eq + Hash, V, T, S: BuildHasher> MappedValueMut<'a, K, V, T, S> {
+    pub fn key(&self) -> &K {
+        self.pair().0
+    }
+
+    pub fn value(&self) -> &T {
+        self.pair().1
+    }
+
+    pub fn value_mut(&mut self) -> &mut T {
+        self.pair_mut().1
+    }
+
+    pub fn pair(&self) -> (&K, &T) {
+        unsafe { (&*self.k, &self.v) }
+    }
+
+    pub fn pair_mut(&mut self) -> (&K, &mut T) {
+        unsafe { (&*self.k, &mut self.v) }
+    }
+
+    pub fn into_map<F, T2>(self, f: F) -> MappedValueMut<'a, K, V, T2, S>
+    where
+        F: FnOnce(&T) -> T2,
+    {
+        MappedValueMut {
+            _guard: self._guard,
+            k: self.k,
+            v: f(&self.v),
+        }
+    }
+
+    pub fn try_into_map<F, T2>(self, f: F) -> Result<MappedValueMut<'a, K, V, T2, S>, Self>
+    where
+        F: FnOnce(&T) -> Option<T2>,
+    {
+        let v = match f(&self.v) {
+            Some(v) => v,
+            None => return Err(self),
+        };
+        let guard = self._guard;
+        let k = self.k;
+        Ok(MappedValueMut {
+            _guard: guard,
+            k,
+            v,
+        })
+    }
+}
+
+impl<'a, K: Eq + Hash + Debug, V, T: Debug, S: BuildHasher> Debug
+    for MappedValueMut<'a, K, V, T, S>
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedValueMut")
+            .field("k", &self.k)
+            .field("v", &self.v)
+            .finish()
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T, S: BuildHasher> Deref for MappedValueMut<'a, K, V, T, S> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value()
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T: std::fmt::Display> std::fmt::Display for MappedValueMut<'a, K, V, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.value(), f)
+    }
+}
+
+impl<'a, K: Eq + Hash, V, T: AsRef<TDeref>, TDeref: ?Sized> AsRef<TDeref>
+    for MappedValueMut<'a, K, V, T>
+{
+    fn as_ref(&self) -> &TDeref {
+        self.value().as_ref()
     }
 }
